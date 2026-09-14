@@ -27,12 +27,12 @@ jobs:
         DEBIAN_FRONTEND=noninteractive sudo apt update
         DEBIAN_FRONTEND=noninteractive sudo apt upgrade
         DEBIAN_FRONTEND=noninteractive sudo apt install coreutils util-linux xz-utils
-        echo $'{\n  "experimental": true\n}' | sudo tee /etc/docker/daemon.json
-        mkdir -p ~/.docker
-        echo $'{\n  "experimental": "enabled"\n}' | sudo tee ~/.docker/config.json
-        sudo service docker restart
-        docker version -f '{{.Client.Experimental}}'
-        docker version -f '{{.Server.Experimental}}'
+        #echo $'{\n  "experimental": true\n}' | sudo tee /etc/docker/daemon.json
+        #mkdir -p ~/.docker
+        #echo $'{\n  "experimental": "enabled"\n}' | sudo tee ~/.docker/config.json
+        #sudo service docker restart
+        #docker version -f '{{.Client.Experimental}}'
+        #docker version -f '{{.Server.Experimental}}'
         docker build --squash --file Dockerfile --tag dvda-author:release-master .
         docker save -o dvda-author-release-master.tar dvda-author:release-master
         [ -f dvda-author-release-master.tar ] && echo "Saved tar image." || "Could not tar."
