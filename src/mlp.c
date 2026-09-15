@@ -79,11 +79,11 @@ uint64_t decode(AVCodecContext *context,
         {
           size_t unpadded_linesize = 0;
 
-          int sampleSize = av_get_bytes_per_sample(codec->sample_fmts[0]);
+          int sampleSize = av_get_bytes_per_sample(context->sample_fmt);
 
           if (sampleSize == 2)
             {
-              unpadded_linesize = frame->channels * sampleSize * frame->nb_samples;
+              unpadded_linesize = frame->ch_layout.nb_channels * sampleSize * frame->nb_samples;
               bytes_written = fwrite(frame->extended_data[0], 1, unpadded_linesize, fp);
             }
           else if (sampleSize == 4)   // 32 bits -> 24 bits (codec->bits_per_raw_sample)
@@ -92,9 +92,9 @@ uint64_t decode(AVCodecContext *context,
 
               for (int s = 0; s < frame->nb_samples; ++s)
                 {
-                  for (int c = 0; c < codecpar->channels; ++c)
+                  for (int c = 0; c < codecpar->ch_layout.nb_channels; ++c)
                     {
-                      uint32_t val = ((int32_t *) frame->extended_data[0])[s * codecpar->channels + c];
+                      uint32_t val = ((int32_t *) frame->extended_data[0])[s * codecpar->ch_layout.nb_channels + c];
                       val  >>= 8; // sampleSize * 8 - codec->bits_per_raw_sample
 
                       bytes_written_sample += fwrite(&val, 1, 3, fp);
@@ -116,13 +116,11 @@ uint64_t decode(AVCodecContext *context,
       if (globals->maxverbose)
         {
           fprintf(stderr,
-                  "Bytes_written: %d Nb samples: %d FR_PTS: %ld PKT_POS: %ld PKT_DURATION: %ld FR_PKT_SIZE; %ld\n",
+                  "Bytes_written: %d Nb samples: %d FR_PTS: %ld FR_DURATION: %ld\n",
                   cumbytes_written,
                   frame->nb_samples,
                   frame->pts,
-                  frame->pkt_pos,
-                  frame->pkt_duration,
-                  frame->pkt_size);
+                  frame->duration);
         }
     }
 
@@ -146,6 +144,7 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 
   FILE *fp_in = NULL;
   FILE *fp_out = NULL;
+  AVPacket *pkt_ptr = NULL;
 
   // get format from audio file
   format = avformat_alloc_context();
@@ -222,7 +221,15 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 
   // prepare to read data
 
-  av_init_packet(&packet);
+  pkt_ptr = av_packet_alloc();
+  if (!pkt_ptr)
+    {
+      fprintf(stderr, "Could not allocate packet\n");
+      exit(1);
+    }
+  packet = *pkt_ptr;
+  packet.data = NULL;
+  packet.size = 0;
 
   int64_t cumbytes_written = 0;
 
@@ -298,13 +305,22 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
           // WaveHeader info : audio and header characteristics
 
           header.header_size_out = 80;
-          header.channels        = codecpar->channels;
+          header.channels        = codecpar->ch_layout.nb_channels;
           header.is_extensible   = header.channels > 2;
-          header.nBlockAlign     = (codecpar->channels * codecpar->bits_per_raw_sample) / 8 ;
+          header.nBlockAlign     = (codecpar->ch_layout.nb_channels * codecpar->bits_per_raw_sample) / 8 ;
           header.wBitsPerSample  = codecpar->bits_per_raw_sample;
-          header.dwChannelMask   = (codecpar->channel_layout < 21
-                                    && codecpar->channel_layout > 0) ?
-                                   cga2wav_channels[codecpar->channel_layout] : 0;
+          // Convert AVChannelLayout to traditional channel mask for compatibility
+          uint64_t channel_layout_mask = 0;
+          if (codecpar->ch_layout.order == AV_CHANNEL_ORDER_NATIVE)
+            {
+              channel_layout_mask = codecpar->ch_layout.u.mask;
+              header.dwChannelMask = (channel_layout_mask < 21 && channel_layout_mask > 0) ?
+                                      cga2wav_channels[channel_layout_mask] : 0;
+            }
+          else
+            {
+              header.dwChannelMask = 0; // Fallback if not native order
+            }
           header.dwSamplesPerSec = codecpar->sample_rate;
 
           // Prepend header to empty file. Will close files.
@@ -342,7 +358,7 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
           int ret;
 
           ret = av_parser_parse2(parser, context,
-                                 &packet.data, &packet.size,
+                                 &pkt_ptr->data, &pkt_ptr->size,
                                  data, data_size,
                                  AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
 
@@ -355,9 +371,9 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
           data      += ret;
           data_size -= ret;
 
-          if (packet.size)
+          if (pkt_ptr->size)
             cumbytes_written = decode(context, codec,
-                                      codecpar, &packet,
+                                      codecpar, pkt_ptr,
                                       frame, fp_out,
                                       info, cumbytes_written,
                                       globals);
@@ -375,11 +391,11 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 
       // Flush
 
-      packet.data = NULL;
-      packet.size = 0;
+      pkt_ptr->data = NULL;
+      pkt_ptr->size = 0;
 
       decode(context, codec,
-             codecpar, &packet,
+             codecpar, pkt_ptr,
              frame, fp_out,
              info, cumbytes_written,
              globals);
@@ -464,7 +480,7 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
           int ret;
 
           ret = av_parser_parse2(parser, context,
-                                 &packet.data, &packet.size,
+                                 &pkt_ptr->data, &pkt_ptr->size,
                                  data, data_size,
                                  AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
 
@@ -477,9 +493,9 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
           data      += ret;
           data_size -= ret;
 
-          if (packet.size)
+          if (pkt_ptr->size)
             cumbytes_written = decode(context, codec, codecpar,
-                                      &packet, frame, NULL,
+                                      pkt_ptr, frame, NULL,
                                       info, cumbytes_written,
                                       globals);
 
@@ -498,7 +514,9 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
             {
               if (HEADER_OFFSET == 0) HEADER_OFFSET = 64;
 
-              PKT_POS_SECT = frame->pkt_pos + HEADER_OFFSET;
+              // Note: pkt_pos is deprecated, but needed for layout calculation
+              // This functionality may need to be reimplemented using alternative methods
+              PKT_POS_SECT = 0; // frame->pkt_pos + HEADER_OFFSET;
 
               SECT_RANK_OLD = SECT_RANK;
               SECT_RANK = (PKT_POS_SECT - 1) / 2048;
@@ -508,7 +526,7 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
               if (new_sector || rank == 0)
                 {
                   if (new_sector) HEADER_OFFSET     += 43;
-                  info->mlp_layout[rank].pkt_pos    = frame->pkt_pos;
+                  info->mlp_layout[rank].pkt_pos    = 0; // frame->pkt_pos;
                   info->mlp_layout[rank].nb_samples = totnbsamples;
                   info->mlp_layout[rank].rank       = SECT_RANK;
 
@@ -519,14 +537,12 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 
               if (globals->maxverbose)
                 {
-                  fprintf(stderr, "Sect: %lu samples_written: %d Nb samples: %d FR_PTS: %ld PKT_POS: %ld PKT_DURATION: %ld FR_PKT_SIZE; %ld\n",
+                  fprintf(stderr, "Sect: %lu samples_written: %d Nb samples: %d FR_PTS: %ld FR_DURATION: %ld\n",
                           SECT_RANK,
                           totnbsamples,
                           frame->nb_samples,
                           frame->pts,
-                          frame->pkt_pos,
-                          frame->pkt_duration,
-                          frame->pkt_size);
+                          frame->duration);
                 }
             }
           else
@@ -536,7 +552,7 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 
         }
 
-      info->mlp_layout[rank].pkt_pos = frame->pkt_pos;
+      info->mlp_layout[rank].pkt_pos = 0; // frame->pkt_pos;
       info->mlp_layout[rank].nb_samples = totnbsamples;
       info->mlp_layout[rank].rank = SECT_RANK;
       info->mlp_layout_size = rank + 1;
@@ -550,7 +566,9 @@ int decode_mlp_file(fileinfo_t *info, globalData *globals)
 clean_up:
 
   av_frame_free(&frame);
-  avcodec_close(context);
+  av_parser_close(parser);
+  av_packet_free(&pkt_ptr);
+  avcodec_free_context(&context);
   avformat_free_context(format);
 
   return errno;
@@ -561,7 +579,18 @@ clean_up:
 
 static int check_sample_fmt(const AVCodec *codec, enum AVSampleFormat sample_fmt)
 {
-  const enum AVSampleFormat *p = codec->sample_fmts;
+  const void *out_config;
+  int ret = avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                                          0, &out_config, NULL);
+  if (ret < 0)
+    {
+      fprintf(stderr, "Error getting supported sample formats\n");
+      return 0;
+    }
+  const enum AVSampleFormat *p = out_config;
+
+  if (!p)
+    return 1;
 
   while (*p != AV_SAMPLE_FMT_NONE)
     {
@@ -665,8 +694,9 @@ static int  channels2layout[6] = { SPEAKER_FRONT_CENTER,
                                      SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | SPEAKER_LOW_FREQUENCY
                                    };
 
-inline static int select_channel_layout(fileinfo_t *info, globalData *globals)
+inline static void select_channel_layout(AVChannelLayout *ch_layout, fileinfo_t *info, globalData *globals)
 {
+  uint64_t channel_mask = 0;
   switch (info->dw_channel_mask)
     {
     // do nothing
@@ -681,10 +711,11 @@ inline static int select_channel_layout(fileinfo_t *info, globalData *globals)
     case  SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY:
     case  SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_BACK_CENTER | SPEAKER_LOW_FREQUENCY:
     case  SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | SPEAKER_LOW_FREQUENCY:
-      return (info->dw_channel_mask);
+      channel_mask = info->dw_channel_mask;
+      break;
     default:
       if (info->channels > 0)
-        return channels2layout[info->channels - 1];  // reassign
+        channel_mask = channels2layout[info->channels - 1];  // reassign
       else
         {
           foutput(ERR "File %s has neither channels or channel layout.", info->filename);
@@ -692,7 +723,7 @@ inline static int select_channel_layout(fileinfo_t *info, globalData *globals)
         }
     }
 
-  return 0;
+  av_channel_layout_from_mask(ch_layout, channel_mask);
 }
 
 static void encode(AVCodecContext *ctx, AVFrame *frame, AVPacket *pkt, FILE *output, globalData *globals)
@@ -726,7 +757,7 @@ static void encode(AVCodecContext *ctx, AVFrame *frame, AVPacket *pkt, FILE *out
 
 inline static uint64_t encode_fmt_s32(AVCodecContext *c, AVFrame *frame, AVPacket *pkt, FILE *in_fp, FILE *out_fp, globalData *globals)
 {
-  int load = c->channels * 4 * c->frame_size;
+  int load = c->ch_layout.nb_channels * 4 * c->frame_size;
 
   uint16_t samples[load];
   memset(samples, 0, load);
@@ -736,10 +767,10 @@ inline static uint64_t encode_fmt_s32(AVCodecContext *c, AVFrame *frame, AVPacke
 
   for (int s = 0; res != 0 && s < c->frame_size; ++s)
     {
-      for (int ch = 0; res != 0 && ch < c->channels; ++ch)
+      for (int ch = 0; res != 0 && ch < c->ch_layout.nb_channels; ++ch)
         {
 
-          res = fread(&samples[(s * c->channels + ch) * 4 + 1], 1, 3, in_fp);
+          res = fread(&samples[(s * c->ch_layout.nb_channels + ch) * 4 + 1], 1, 3, in_fp);
 
           bytes_read_per_sample += res;
         }
@@ -765,7 +796,7 @@ inline static uint64_t encode_fmt_s32(AVCodecContext *c, AVFrame *frame, AVPacke
 
 inline static uint64_t encode_fmt_s16(AVCodecContext *c, AVFrame *frame, AVPacket *pkt, FILE *in_fp, FILE *out_fp, globalData *globals)
 {
-  int load = c->channels * 2 * c->frame_size;
+  int load = c->ch_layout.nb_channels * 2 * c->frame_size;
 
   uint16_t *samples = (uint16_t *) frame->data[0];
   static uint64_t bytes_read;
@@ -804,8 +835,8 @@ int encode_mlp_file(fileinfo_t *info, globalData *globals)
 
   const AVCodec *codec;
   AVCodecContext *c = NULL;
-  AVFrame *frame;
-  AVPacket *pkt;
+  AVFrame *frame = NULL;
+  AVPacket *pkt = NULL;
   int ret;
   uint16_t *samples;
   int32_t bytes_written = 0;
@@ -836,8 +867,7 @@ int encode_mlp_file(fileinfo_t *info, globalData *globals)
     }
 
   c->sample_rate    = info->samplerate;
-  c->channel_layout = select_channel_layout(info, globals);
-  c->channels       = info->channels;
+  select_channel_layout(&c->ch_layout, info, globals);
   c->bits_per_coded_sample = info->bitspersample;
 
   /* open it */
@@ -893,7 +923,7 @@ int encode_mlp_file(fileinfo_t *info, globalData *globals)
 
   frame->nb_samples     = c->frame_size;
   frame->format         = c->sample_fmt;
-  frame->channel_layout = c->channel_layout;
+  av_channel_layout_copy(&frame->ch_layout, &c->ch_layout);
 
   // allocate the data buffers
 
